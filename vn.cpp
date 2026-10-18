@@ -19,6 +19,7 @@ const int ON_PORT = 5000;       // oracle's TCP port (fixed by the problem)
 const int MAX_NODES = 26;       // nodes are named A..Z
 const int LSP_PERIOD = 10;      // seconds between periodic LSPs
 const int PRINT_PERIOD = 10;    // seconds between graph printouts
+const int LSP_COPIES = 3;       // send each LSP this many times, in case UDP drops one
 
 // TCP messages: 3-byte header = type (1) + body length (2), then the body
 const uint8_t MSG_CONNECT = 1;
@@ -72,7 +73,7 @@ sockaddr_in make_addr(uint32_t ip, uint16_t port) {
     sockaddr_in a;
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
-    a.sin_addr.s_addr = ip;       // already network byte order
+    a.sin_addr.s_addr = ip;     // already network byte order
     a.sin_port = htons(port);
     return a;
 }
@@ -161,9 +162,11 @@ bool handle_oracle_message() {
 
 // Send a packet to every neighbour.
 void flood(const uint8_t *pkt, int len) {
-    for (int i = 0; i < nbr_count; i++) {
-        sockaddr_in to = make_addr(nbrs[i].ip, nbrs[i].port);
-        sendto(udp_fd, pkt, len, 0, (sockaddr *)&to, sizeof to);
+    for (int c = 0; c < LSP_COPIES; c++) {
+        for (int i = 0; i < nbr_count; i++) {
+            sockaddr_in to = make_addr(nbrs[i].ip, nbrs[i].port);
+            sendto(udp_fd, pkt, len, 0, (sockaddr *)&to, sizeof to);
+        }
     }
 }
 
@@ -228,6 +231,15 @@ void handle_lsp() {
 
 // ---------- printing the known graph ----------
 
+// True if node j's latest LSP lists node k as a neighbour.
+bool reports(int j, int k) {
+    if(!db[j].known) return false;
+    for(int e=0; e<db[j].count; e++) {
+        if(db[j].ids[e] == 'A' + k) return true;
+    }
+    return false;
+}
+
 // Fill g with the graph known from all LSPs (-1 = no link) and return the
 // number of nodes to show (1 + highest node letter heard of).
 int build_graph(long g[MAX_NODES][MAX_NODES]) {
@@ -239,6 +251,8 @@ int build_graph(long g[MAX_NODES][MAX_NODES]) {
         if (k + 1 > n) n = k + 1;
         for (int e = 0; e < db[k].count; e++) {
             int j = db[k].ids[e] - 'A';
+            if(j + 1 > n) n = j+1;
+            if(!reports(j,k)) continue; // two-way check
             g[k][j] = g[j][k] = db[k].costs[e];
             if (j + 1 > n) n = j + 1;
         }
@@ -276,8 +290,7 @@ int main(int argc, char *argv[]) {
     if (inet_aton(argv[1], &oracle_addr) == 0 || inet_aton(argv[3], &me_addr) == 0 ||
         is_bad_ip(oracle_addr.s_addr) || is_bad_ip(me_addr.s_addr) ||
         port < 1024 || port > 65535) {
-        fprintf(stderr, "error: give real IPs (not 127.x.x.x or 0.0.0.0) "
-                        "and a port in 1024..65535\n");
+        fprintf(stderr, "error: give real IPs (not 127.x.x.x or 0.0.0.0) and a port in 1024..65535\n");
         return 1;
     }
     my_ip = me_addr.s_addr;
@@ -292,11 +305,17 @@ int main(int argc, char *argv[]) {
     }
 
     // 3. TCP connection to the oracle, then CONNECT
-    tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in on = make_addr(oracle_addr.s_addr, ON_PORT);
-    if (tcp_fd < 0 || connect(tcp_fd, (sockaddr *)&on, sizeof on) < 0) {
-        perror("error: cannot connect to the oracle");
-        return 1;
+    sockaddr_in on = make_addr(oracle_addr.s_addr , ON_PORT);
+    while(true) {
+        tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if(tcp_fd < 0) {
+            perror("error: cannot create TCP socket");
+            return 1;
+        }
+        if(connect(tcp_fd, (sockaddr *)&on, sizeof on) == 0) break;
+        perror("error: cannot connect to the oracle retrying in 2s");
+        close(tcp_fd);
+        sleep(2);
     }
     uint8_t msg[HEADER_SIZE + CONNECT_BODY_SIZE];
     msg[0] = MSG_CONNECT;

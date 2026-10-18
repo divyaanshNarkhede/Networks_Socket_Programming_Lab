@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # oracle.py - Oracle Node (ON) of the link-state emulator.
 #
-# Usage: python3 oracle.py <config-file>
+# Usage: python3 oracle.py <config-file> [my-ip]
 
 import os
 import select
@@ -31,6 +31,8 @@ def letter(i):
 
 
 def find_my_ip():
+    if len(sys.argv) == 3:
+          return sys.argv[2]        # given on the command line
     # connect() on a UDP socket sends nothing; it only makes the kernel pick
     # the outgoing interface, whose address getsockname() then tells us.
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -143,12 +145,18 @@ def send_all_link_states():
 
 def accept_new(listener):
     sock, peer = listener.accept()
-    if len(nodes) == MAX_NODES:
+    # reuse the letter of a node that disconnected before sending CONNECT
+    free = [k for k, nd in enumerate(nodes) if nd.sock is None and nd.ip is None]
+    if free :
+        i = free[0]
+        nodes[i].sock = sock
+    elif len(nodes) == MAX_NODES:
         log(f"rejecting {peer[0]}:{peer[1]}: already {MAX_NODES} nodes")
         sock.close()
         return
-    nodes.append(Node(sock))          # first connection is A, next B, ...
-    i = len(nodes) - 1
+    else :
+        nodes.append(Node(sock))          # first connection is A, next B, ...
+        i = len(nodes) - 1
     extra = " (extra node: disconnected island)" if i >= len(cost) else ""
     log(f"accepted {peer[0]}:{peer[1]} as node {letter(i)}{extra}")
 
@@ -212,8 +220,8 @@ def check_config():
 def main():
     global config_path, config_mtime, cost
 
-    if len(sys.argv) != 2:
-        print(f"usage: {sys.argv[0]} <config-file>")
+    if len(sys.argv) not in (2, 3):
+        print(f"usage: {sys.argv[0]} <config-file> [my-ip]")
         sys.exit(1)
     config_path = sys.argv[1]
     try:
@@ -232,7 +240,7 @@ def main():
         listener.bind((my_ip, ON_PORT))
         listener.listen(MAX_NODES)
     except OSError as e:
-        print(f"error: cannot open TCP port {ON_PORT}: {e}")
+        print(f"error: cannot open TCP port {ON_PORT}: {e} " f"(if there is no network route, give the IP: {sys.argv[0]} <config-file> <my-ip>)")
         sys.exit(1)
     log(f"listening on TCP {my_ip}:{ON_PORT}")
 
